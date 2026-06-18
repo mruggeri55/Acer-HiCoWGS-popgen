@@ -2,7 +2,7 @@ This repository includes scripts to recreate analyses for a manuscript entitled 
 
 Raw sequencing reads generated in this study can be downloaded from the NCBI SRA database under BioProject PRJNA1094960. Previously sequenced samples from Panama (Vollmer et al 2023) can be sourced from NCBI BioProj PRJNA950067.
 
-"read_processing" contains bash scripts to trim and filter raw reads.
+"read_processing" contains bash scripts to trim and filter raw reads for BioProject PRJNA1094960. Read processing scripts for NCBI BioProj PRJNA950067 can be found <<link to Paige's github>>.
 "genotyping" contains scripts to call genotypes in each sample separately and merge into a single vcf.
 "pop_gen" contains scripts to recreate migration (EEMS), genomic diversity (pi, tajima's D, private alleles), and demographic history (SMC++) analyses.
 "symbionts" contains scripts to recreate ITS2 and alelle frequency-based symbiont community analysis.
