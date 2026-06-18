@@ -1,1 +1,8 @@
+This repository includes R scripts and data to recreate analyses for a manuscript entitled "Limited neutral and adaptive genomic variation suggests Acropora cervicornis can be managed as a single conservation unit across its range" currently in preparation.
 
+Raw sequencing reads generated in this study can be downloaded from the NCBI SRA database under BioProject PRJNA1094960. 
+Additional previously sequenced samples from Panama (Vollmer et al 2023) can be sourced from NCBI BioProj PRJNA950067.
+
+"read_processing" contains bash scripts to trim and filter raw reads.
+"genotyping" contains scripts to call genotypes in each sample separately and merge into a single vcf.
+"pop_gen" contains scripts to recreate migration (EEMS), genomic diversity (pi, tajima's D, private alleles), and demographic history (SMC++) analyses.
