@@ -1,0 +1,177 @@
+#### blasting to symportal ITS2 database ####
+
+# coming back to this Nov 2025
+salloc --time 2:00:00 --mem=16GB
+module load blast-plus/2.14.1
+symDB=/project2/ckenkel_26/software/SymPortal_framework-0.3.22/symbiodiniaceaeDB
+IN=/scratch1/mruggeri/AcerHapPanel/final_sanger
+# convert bam to fasta -- trying to reduce file size for test but will probs need to use raw reads with host and sym beyond this
+module load samtools
+samtools fasta DRTO_178.sym.marked_duplicates.bam2 > test.fa
+#cd $symDB
+#makeblastdb -in refSeqDB.fa -dbtype nucl
+blastn -db $symDB/refSeqDB.fa -query $IN/test.fa -out test.out -outfmt 6 -perc_identity 90 -max_target_seqs 1
+
+# for blast outfmt 6 refresher: https://www.metagenomics.wiki/tools/blast/blastn-output-format-6
+awk '{print $2}' test.out | sort -u
+# A16l
+# A16n
+# A1ba
+# A1dv
+# A1eo
+# A1ep
+# A3e
+# A3g
+# A3l
+# A3m
+# A4p
+# A4x
+# A8b
+# C40c
+# E1a
+
+# note E and C short seqs ~35bp
+wc -l test.out
+# 973 matches in test file
+# limit length to at least 50bps
+awk '$4>=50 {print}' test.out | wc -l
+# 779 with 50bp threshold
+awk '$4>=100 {print $2}' test.out | wc -l
+# 505 with 100bp threshold
+awk '$4>=50 {print $2}' test.out | sort -u
+# A16l
+# A16n
+# A1dv
+# A1eo
+# A3e
+# A3g
+# A3l
+# A3m
+# A4x
+# A8b
+
+# no more Cs or Es after filtering for at least 50bp match
+
+# to count how many entries for each ITS2 variant
+awk '$4>=50 {print}' test.out | awk '{counts[$2]++} END {for (v in counts) print v, counts[v]}' 
+# A1dv 1
+# A3l 372
+# A4x 3
+# A3m 7
+# A1eo 1
+# A3e 2
+# A16l 71
+# A3g 105
+# A16n 212
+# A8b 5
+awk '$4>=100 {print}' test.out | awk '{counts[$2]++} END {for (v in counts) print v, counts[v]}' 
+# A3l 241
+# A3m 7
+# A3e 2
+# A16l 71
+# A3g 105
+# A16n 76
+# A8b 3
+
+# hmm so length changes things -- see A3g vs A16n
+# did alignments of A16 and A3 variants and some very close to one another
+# used clustal to align all A3 and A16 variants in database
+# plotted tree (dnd file) in R using ape::read.tree and plot.phylo
+
+# let's restrict based on similarity
+awk '$4>=100 && $3>=98 {print}' test.out | awk '{counts[$2]++} END {for (v in counts) print v, counts[v]}' 
+# A3l 241
+# A3m 7
+# A3e 2
+# A16l 57
+# A3g 105
+# A16n 69
+# A8b 3
+# reduced some A16 but none of A3 which is good
+awk '$4>=100 && $3>=99 {print}' test.out | awk '{counts[$2]++} END {for (v in counts) print v, counts[v]}'
+# A3l 238
+# A3m 7
+# A3e 2
+# A3g 104
+# A16n 35
+# A8b 2
+# 99% reduces some A3s but not a lot, gets rid of A16 completely
+awk '$4>=100 && $3>=99.5 {print}' test.out | awk '{counts[$2]++} END {for (v in counts) print v, counts[v]}'
+# A3l 216
+# A3m 7
+# A3e 2
+# A3g 92
+# 99.5% only A3 variants
+
+###### modifying to only count forward of forward and reverse reads
+awk '
+$4>=100 && $3>=99.5 {
+    split($1, a, "/")        # take the part before the first /
+    key = a[1]
+
+    if (!seen[key]++)        # count only the first time this prefix appears
+        counts[$2]++
+}
+END {
+    for (v in counts) print v, counts[v]
+}' test.out
+# A3l 187
+# A3m 7
+# A3e 2
+# A3g 90
+
+awk '
+$4>=149 && $3>=99 {
+    split($1, a, "/")        # take the part before the first /
+    key = a[1]
+
+    if (!seen[key]++)        # count only the first time this prefix appears
+        counts[$2]++
+}
+END {
+    for (v in counts) print v, counts[v]
+}' test.out
+# A3l 46
+# A3m 2
+# A3g 52
+
+###### let's run this for each sample -- with only basic filters then will filter for length, percent identity, etc after
+# already converted bam to fa and are here /scratch1/mruggeri/AcerHapPanel/sym_new/blast/old/DB
+# making this a job -- ITS2blast_Nov2025.sh
+#!/bin/bash
+#SBATCH --partition=epyc-64   
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem-per-cpu=2G
+#SBATCH --time=04:00:00
+#SBATCH --mail-type=END
+#SBATCH --mail-user=mruggeri@usc.edu
+#SBATCH	--error=/scratch1/mruggeri/AcerHapPanel/log/sym/%x_%a.err
+#SBATCH --output=/scratch1/mruggeri/AcerHapPanel/log/sym/%x_%a.out
+
+module load blast-plus/2.14.1
+symDB=/project2/ckenkel_26/software/SymPortal_framework-0.3.22/symbiodiniaceaeDB
+fa_dir=/scratch1/mruggeri/AcerHapPanel/sym_new/blast/old/DB
+
+for file in `ls $fa_dir/*.sym.fa`; do
+	SAMPLE=$(basename $file | sed s/.sym.fa//g)
+	blastn -db $symDB/refSeqDB.fa -query $file -out $SAMPLE'.out' -outfmt 6 -perc_identity 90 -max_target_seqs 1;
+	done
+
+# then filter output and count variant matches in each sample
+for sample in *.out; do
+    awk -v fname="$sample" '
+    $4>=149 && $3>=99 {
+        split($1, a, "/")
+        key = a[1]
+
+        if (!seen[key]++)
+            counts[$2]++
+    }
+    END {
+        for (v in counts)
+            print v, counts[v], fname
+    }' "$sample"
+done
+
+

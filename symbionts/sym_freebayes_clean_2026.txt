@@ -1,0 +1,113 @@
+##### symbiont analysis #####
+# starting April 2025
+# estimating allele frequencies from pooled samples using Freebayes similar to https://www.pnas.org/doi/full/10.1073/pnas.2115608119 
+# FreeBayes can act as a frequency-based pooled caller and describe variants and haplotypes in terms of observation frequency rather than called genotypes. 
+# then will use DAPC to look for any structure
+
+# https://github.com/freebayes/freebayes
+#Generate frequency-based calls for all variants passing input thresholds. 
+#You'd do this in the case that you didn't know the number of samples in the pool.
+# p is ploidy -- for syms mostly haploid so setting to 1
+# C is number of supporting observations to retain variant
+# g is max depth
+# r is region (chr) will use this for test
+#  -F --min-alternate-fraction N Require at least this fraction of observations supporting an alternate allele within a single individual in order to evaluate the position.  default: 0.05 BUT for pools set to 0.01
+# use best n alleles reduced computation time (otherwise may run forever)
+
+# try changing read group ID to sample
+# right now we have sample specified in the RGSM tag but apparently needs to be ID for freebayes
+NAME=IBBZ_13837
+module load bamtools picard openjdk/21.0.0_35
+bamtools header -in $NAME'.sym.marked_duplicates.bam2' | grep "@RG"
+java -Xmx4G -jar $PICARD AddOrReplaceReadGroups I=$NAME'.sym.marked_duplicates.bam2' O=$NAME'.sym.rg4freebayes.bam' RGID=$NAME RGLB=lib1 RGPU=unit1 RGPL=illumina RGSM=$NAME
+bamtools header -in $NAME'.sym.rg4freebayes.bam' | grep "@RG"
+# this works, now will run for all samples
+salloc --time 2:00:00 --mem=16GB
+for NAME in `cat IDall`; do java -Xmx4G -jar $PICARD AddOrReplaceReadGroups I=$NAME'.sym.marked_duplicates.bam2' O=$NAME'.sym.rg4freebayes.bam' RGID=$NAME RGLB=lib1 RGPU=unit1 RGPL=illumina RGSM=$NAME; done
+# run as job in future, took a bit longer than I wanted it to
+NAME=AR_113
+bamtools header -in $NAME'.sym.rg4freebayes.bam' | grep "@RG"
+# now reindex files
+module load samtools 
+for NAME in `cat IDall`; do samtools index $NAME'.sym.rg4freebayes.bam'; done
+
+# great! now let's try freebayes 
+# also remake bam list with new file names
+module load freebayes/1.3.6
+REF=/project/ckenkel_26/RefSeqs/AcerGenome/Sanger_Inst_GCA_964034985.1/just_S.fitti.fa
+BAMS=/scratch1/mruggeri/AcerHapPanel/final_sanger/symbams.RG.list
+IN=/scratch1/mruggeri/AcerHapPanel/final_sanger
+OUT=/scratch1/mruggeri/AcerHapPanel/sym_new/freebayes
+
+cd $IN
+freebayes -f $REF -r k127_5073759 -F 0.01 -C 2 -g 200 -m 40 -q 20 -p 1 --use-best-n-alleles 4 --pooled-continuous --bam-list $BAMS --gvcf > $OUT/sym.test.vcf
+cd $OUT
+module load bcftools
+bcftools filter -i 'INFO/DP>10 && QUAL>20' --SnpGap 5 sym.test.vcf | bcftools view -v snps -o sym.DP10qual20.snps.vcf
+# 71 loci (all variantes) before filtering, 16 snps after
+# note this is a tiny contig
+bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' sym.DP10qual20.snps.vcf 
+# hmm most appear to have two alleles (one ref, one alt) but GTs are haploid which is good
+# but non-filtered also looks similar, the rest are indels
+# let's move on with full ref and then get back to filtering
+
+## put the following in bash script sym_freebayes.sh and ran as job
+# module load freebayes/1.3.6
+# REF=/project/ckenkel_26/RefSeqs/AcerGenome/Sanger_Inst_GCA_964034985.1/just_S.fitti.fa
+# BAMS=/scratch1/mruggeri/AcerHapPanel/final_sanger/symbams.RG.list
+# IN=/scratch1/mruggeri/AcerHapPanel/final_sanger
+# OUT=/scratch1/mruggeri/AcerHapPanel/sym_new/freebayes
+# 
+# cd $IN
+# freebayes -f $REF -F 0.01 -C 2 -g 200 -m 40 -q 20 -p 1 --use-best-n-alleles 4 --pooled-continuous --bam-list $BAMS --gvcf > $OUT/sym.freebayes.vcf
+# cd $OUT
+# module load bcftools
+# bcftools filter -i 'INFO/DP>10 && QUAL>20' --SnpGap 5 sym.freebayes.vcf | bcftools view -v snps -o sym.freebayes.DP10qual20.snps.vcf
+sbatch -J freebayes sym_freebayes.sh
+
+# 3,530,358 variants in initial file
+# 883,750 snps in filtered file
+bcftools view -i "F_MISSING<0.1" sym.freebayes.DP10qual20.snps.vcf | bcftools query -f '%CHROM\t%POS\n' | wc -l
+# 21,739 snps left after reducing missingness to 10%
+# 86,931 snps if missingness at 20%
+# stricter might be better because lower coverage data?
+bcftools view -i "F_MISSING<0.1" sym.freebayes.DP10qual20.snps.vcf -o sym.freebayes.DP10qual20.snps.miss10.vcf
+
+# OK SO WE NEED TO BE LOOKING AT THE RO (obs ref) AND AO (obs alt) fields
+# so we set ploidy to 1 but allow multi-allelics
+bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\t[ %DP:%RO:%AO]\n' sym.freebayes.DP10qual20.snps.miss10.vcf | head -n 100
+
+# Export haplotype and allele count information
+salloc --time 2:00:00 --mem=16GB
+VCF=/scratch1/mruggeri/AcerHapPanel/sym_new/freebayes/sym.freebayes.DP10qual20.snps.miss10.vcf 
+module load openjdk/21.0.0_35 gatk/4.5.0.0
+gatk VariantsToTable -V $VCF -O sym.freebayes.RD.FORMAT -F CHROM -F POS -F REF -ASGF RO
+gatk VariantsToTable -V $VCF -O sym.freebayes.AD.FORMAT -F CHROM -F POS -F ALT -ASGF AO --split-multi-allelic
+module load vcftools
+vcftools --vcf $VCF --extract-FORMAT-info GT --out sym.freebayes.GT
+
+# trying to normalize counts so I can do PCA (aka convert to allele frequencies by dividing by depth)
+module load bcftools
+bcftools query -H -f '%CHROM\t%POS\t%REF\t[ %RO/%DP]\n' $VCF | head -n 10
+bcftools query -H -f '%CHROM\t%POS\t%ALT\t[ %AO/%DP]\n' $VCF | head -n 10
+# checking splitting multiallelic
+bcftools norm -m -snps $VCF | bcftools query -H -f '%CHROM\t%POS\t%ALT\t[ %AO/%DP]\n' | grep 'k127_4445195' | grep '275'
+bcftools query -H -f '%CHROM\t%POS\t%ALT\t[ %AO/%DP]\n' $VCF | grep 'k127_4445195' | grep '275'
+# this is my own solution but I think this works better than above so I can get allele frequencies
+# so basically I am extracting the reference allele and its frequency by sample (RO/DP)
+# then doing the same for the alt allele(s) (AO/DP) -- making sure to split multiallelics
+# then will concatenate both files together and can do a PCA
+# so extract frequencies for ref allele
+bcftools query -H -f '%CHROM\t%POS\t%REF\t[ %RO/%DP]\n' $VCF -o sym.freebayes.RefFreq.txt
+# split multiallelics and extract frequencies of alt allele
+bcftools norm -m -snps $VCF | bcftools query -f '%CHROM\t%POS\t%ALT\t[ %AO/%DP]\n' -o sym.freebayes.AltFreq.txt
+# got the following error -- need to look into that later
+#[W::vcf_parse_format_fill5] Extreme FORMAT/QA value encountered at k127_4287815:2205
+
+#Lines   total/split/joined/realigned/skipped:	21739/4476/0/0/0 -- so 4476 multiallelics split
+
+cat sym.freebayes.RefFreq.txt sym.freebayes.AltFreq.txt > sym.freebayes.RefAltCatFreq.txt
+wc -l sym.freebayes.RefAltCatFreq.txt 
+# 21740 Ref, 27565 Alt, 49305 Cat -- great this worked!
+
+bcftools view -h sym.freebayes.DP10qual20.snps.miss10.vcf | tail -n -1 | sed 's/\t/\n/g' | tail -n +10 > SampleOrderFreq.txt
