@@ -1,0 +1,242 @@
+# demographic history analysis
+# Oct 2025 -- adding in more panama samples
+# also iterating over every individual as distinguished lineage
+
+# resources: 
+# https://github.com/popgenmethods/smcpp?tab=readme-ov-file#tips-for-using-smc
+# https://pmc.ncbi.nlm.nih.gov/articles/PMC5470542/#S17
+# https://github.com/bakeronit/acropora_digitifera_wgs/blob/main/07.demographic_history.md
+
+salloc --time=3:00:00 --mem=32G
+cd /scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp_morePAN
+
+# make bed file for uncalled loci, filtered snps, and repetitive regions
+# convert good sites file (sites_rmHWE.txt see diversity stats) to bed file
+# then all missing sites should be masked
+sites=/scratch1/mruggeri/AcerHapPanel/pop_gen/pixy/sites_rmHWE.txt
+awk 'BEGIN{OFS="\t"} {print $1, ($3 = $2 - 1), $2}' $sites > good_sites_snps_and_invariant.bed
+
+salloc --partition=meb_largemem --time=3:00:00
+module load bedtools2/2.31.1
+gBED=/project2/ckenkel_26/RefSeqs/AcerGenome/Sanger_Inst_GCA_964034985.1/GCA_964034985.1_jaAcrCerv1.1_genomic.fna.fai
+bedtools merge -i good_sites_snps_and_invariant.bed > temp.bed
+bedtools sort -g $gBED -i temp.bed > temp2.bed
+bedtools complement -i temp2.bed -g $gBED > mask.bed
+
+# then need to combine repeat mask bed and filtered snp bed
+gREPS=/scratch1/mruggeri/AcerHapPanel/vcfSanger/final_merge/Acer_repeats.bed
+cat $gREPS mask.bed > SMCmask.bed
+bedtools sort -g $gBED -i SMCmask.bed | bedtools merge -i stdin > SMCmask_sorted_merged.bed
+bgzip SMCmask_sorted_merged.bed
+tabix -p bed SMCmask_sorted_merged.bed.gz 
+
+# now can move onto SMC++
+salloc --partition=meb_largemem --ntasks=30 --time=3:00:00 --mem=0
+# run this for each population -- change POP list and prefix for naming
+MASK=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp_morePAN/SMCmask_sorted_merged.bed.gz 
+VCF=/project2/ckenkel_26/Acer_WGS/vcfs/Sep2025_morePAN/snps.5bpind.merged.morePAN.minDP10.maxDP50.qual.SOR.miss10.vcf.gz
+SIF=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp/smcpp_latest.sif
+lists=/scratch1/mruggeri/AcerHapPanel/pop_gen/lists
+CHROMS=$lists/chrom.list
+POP=$lists/AR_CU.pop.list  
+prefix=AR_CU
+module load apptainer
+
+# subset samples and chromosome from vcf and convert to smc format
+mkdir $prefix'_vcf2smc'
+for CHROM in `cat $CHROMS`; do
+for SAMPLE in `cat $POP`; do
+apptainer exec --bind $PWD,/scratch1/mruggeri,/project2/ckenkel_26 $SIF \
+ smc++ vcf2smc -d $SAMPLE $SAMPLE --mask $MASK $VCF $prefix'_vcf2smc'/$prefix'_'$SAMPLE'_'$CHROM'.smc.gz' $CHROM $prefix':'$(echo $SAMPLE);
+ done; done
+
+# estimate Ne
+# you can do this for one chrom with one core but all requires multiple
+# salloc --partition=meb_largemem --ntasks=30 --time=3:00:00 --mem=0
+apptainer exec --bind $PWD,/scratch1/mruggeri $SIF smc++ estimate \
+--cores 30 --em-iterations 50 --timepoints 20 200000 --thinning 3000 --knots 20 4e-9 \
+$prefix'_vcf2smc'/*.smc.gz -o $prefix'_out'
+
+#### plot results for all pops together
+mkdir plots
+apptainer exec --bind $PWD,/scratch1/mruggeri,/project2/ckenkel_26 $SIF \
+smc++ plot plots/'all_pops_u4e09.pdf' -g 5 \
+-c FLKeys_out/model.final.json MEX_BZ_out/model.final.json DR_JAM_out/model.final.json PAN_out/model.final.json AR_CU_out/model.final.json  
+
+##### 11 Nov 2025
+##### redo estimate with 8 inds per pop
+# need to make list of random 8 inds
+lists=/scratch1/mruggeri/AcerHapPanel/pop_gen/lists
+POP=$lists/PAN.pop.list 
+prefix=PAN
+ 
+SUBSET=$(shuf -n 8 $POP)
+IN_FILES=$(awk -v dir=$prefix'_vcf2smc/'$prefix '{print dir "_" $1 "_*.vcf.gz"}' <<< "$SUBSET" | paste -sd' ' -)
+# this works
+
+# also going to add config file in script so each pop is run in parallel
+# running on endeavour
+# naming the following /scripts/pop_gen/SMCest_11Nov2025.sh
+
+#!/bin/bash
+#SBATCH --partition=meb_largemem
+#SBATCH --ntasks=30
+#SBATCH --time=01:00:00
+#SBACTH --mem=0
+#SBATCH --error=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp_morePAN/err/%x_%j.err
+#SBATCH --output=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp_morePAN/out/%x_%j.out
+#SBATCH --mail-type=END
+#SBATCH --mail-user=mruggeri@usc.edu
+#SBATCH --array=1-5
+
+config=/scratch1/mruggeri/AcerHapPanel/pop_gen/lists/config_region.txt
+POP=$(awk -v ArrayTaskID=$SLURM_ARRAY_TASK_ID '$1==ArrayTaskID {print $2}' $config)
+DIR=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp_morePAN
+
+MASK=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp_morePAN/SMCmask_sorted_merged.bed.gz 
+VCF=/project2/ckenkel_26/Acer_WGS/vcfs/Sep2025_morePAN/snps.5bpind.merged.morePAN.minDP10.maxDP50.qual.SOR.miss10.vcf.gz
+SIF=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp/smcpp_latest.sif
+LIST=/scratch1/mruggeri/AcerHapPanel/pop_gen/lists/$POP.pop.list 
+# subsetting 8 inds per pop, if you want to run all inds just set SUBSET to $LIST
+SUBSET=$(shuf -n 8 $LIST)
+IN_FILES=$(awk -v dir=$POP'_vcf2smc/'$POP '{print dir "_" $1 "_*.smc.gz"}' <<< "$SUBSET" | paste -sd' ' -)
+
+cd $DIR
+module load apptainer
+apptainer exec --bind $PWD,/scratch1/mruggeri $SIF smc++ estimate \
+--cores 30 --em-iterations 50 --timepoints 20 200000 --thinning 3000 --knots 20 4e-9 \
+$IN_FILES -o $POP'_sub8_out/'$POP.model.json
+
+# for future, this creates another directory, not sure how to actually rename output so not creating so many directories
+# then plot results on login node
+module load apptainer
+SIF=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp/smcpp_latest.sif
+
+apptainer exec --bind $PWD,/scratch1/mruggeri,/project2/ckenkel_26 $SIF \
+smc++ plot plots/'all_pops_u4e09_sub8.pdf' -g 5 \
+-c FLKeys_sub8_out/FLKeys.model.json/model.final.json MEX_BZ_sub8_out/MEX_BZ.model.json/model.final.json \
+ DR_JAM_sub8_out/DR_JAM.model.json/model.final.json PAN_sub8_out/PAN.model.json/model.final.json \
+  AR_CU_sub8_out/AR_CU.model.json/model.final.json  
+
+# sftp pdf plot and csv file to plot manually in R
+# n=8 changes things so sample size has an effect
+# note that diversity stats tracked Ne for full dataset so also need to redo that with n=8
+
+# shuffling random 8 across a couple of runs
+# note that AR_CU and MEX_BZ have 8 so these shouldn't change
+# adding out directory variable into script
+# OUT=$POP'_sub8_run2/'
+sbatch -J run2 ../../scripts/pop_gen/SMCest_11Nov2025.sh
+
+# meb_largemem in heavy use
+# running run3 on epyc-64
+# change outdir and partition
+nano ../../scripts/pop_gen/SMCest_11Nov2025.sh
+sbatch -J run3 ../../scripts/pop_gen/SMCest_11Nov2025.sh
+# running on epyc-64, meb still in waiting
+# adding in run4 and 5 on epyc-64
+# this did not work, not enough mem for all pops so need to run on endeavour but super backed up
+
+# so note need to delete run 3, 4, and 5 because ran out of mem
+
+# 24 Nov running on endeavour
+sbatch -J run6 ../../scripts/pop_gen/SMCest_11Nov2025.sh
+# endeavour still backed up by someone -- submitted soo many scripts and each are running for 5+ days
+# will run before theirs if I set short run times!
+sbatch -J run7 ../../scripts/pop_gen/SMCest_11Nov2025.sh
+sbatch -J run8 ../../scripts/pop_gen/SMCest_11Nov2025.sh
+
+# next step is to make some pseudo population lists to get "neutral" history
+# aka if our pops are just a random grouping of 8 individuals do we get differences
+
+# plot results from all 5 runs with random 8 inds
+salloc -p meb_largemem
+module load apptainer
+SIF=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp/smcpp_latest.sif
+
+apptainer exec --bind $PWD,/scratch1/mruggeri,/project2/ckenkel_26 $SIF \
+smc++ plot plots/'all_pops_u4e09_sub8_5runs.pdf' -g 5 \
+-c FLKeys_sub8_*/* MEX_BZ_sub8_*/* DR_JAM_sub8_*/* PAN_sub8_*/* AR_CU_sub8_*/*
+
+# looks like there is just some variation in recent Ne across runs (even when running the same exact samples)
+
+######### let's run everything as one population
+# making new script SMCest_global_25Nov2025.sh from SMCest_11Nov2025.sh
+# #!/bin/bash
+# #SBATCH --partition=meb_largemem
+# #SBATCH --ntasks=30
+# #SBATCH --time=03:00:00
+# #SBACTH --mem=0
+# #SBATCH --error=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp_morePAN/err/%x_%j.err
+# #SBATCH --output=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp_morePAN/out/%x_%j.out
+# #SBATCH --mail-type=END
+# #SBATCH --mail-user=mruggeri@usc.edu
+# 
+# # for estimating historical Ne for all samples (not by pop)
+# DIR=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp_morePAN
+# MASK=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp_morePAN/SMCmask_sorted_merged.bed.gz 
+# VCF=/project2/ckenkel_26/Acer_WGS/vcfs/Sep2025_morePAN/snps.5bpind.merged.morePAN.minDP10.maxDP50.qual.SOR.miss10.vcf.gz
+# SIF=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp/smcpp_latest.sif
+# LIST=/scratch1/mruggeri/AcerHapPanel/pop_gen/lists/morePAN.list 
+# IN_FILES=$(ls *_vcf2smc/* | paste -sd' ' -)
+# OUT=global_run1
+# 
+# cd $DIR
+# module load apptainer
+# apptainer exec --bind $PWD,/scratch1/mruggeri $SIF smc++ estimate \
+# --cores 30 --em-iterations 50 --timepoints 20 200000 --thinning 3000 --knots 20 4e-9 \
+# $IN_FILES -o $OUT
+
+sbatch -J global_run1 ../../scripts/pop_gen/SMCest_global_25Nov2025.sh
+# AssertionError: Only one or two populations are supported, but the following were found in the data: ['PAN', 'MEX_BZ', 'AR_CU', 'FLKeys', 'DR_JAM']
+
+# basically need to run vcf2smc again specifying the pop as the same across all samples, sigh
+salloc --partition=largemem --ntasks=30 --time=3:00:00 --mem=0 # not working, need to wait in queue
+### vcf2smc_global.sh
+#!/bin/bash
+#SBATCH --partition=meb_largemem
+#SBATCH --ntasks=30
+#SBATCH --time=03:00:00
+#SBACTH --mem=0
+#SBATCH --error=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp_morePAN/err/%x_%j.err
+#SBATCH --output=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp_morePAN/out/%x_%j.out
+#SBATCH --mail-type=END
+#SBATCH --mail-user=mruggeri@usc.edu
+
+MASK=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp_morePAN/SMCmask_sorted_merged.bed.gz 
+VCF=/project2/ckenkel_26/Acer_WGS/vcfs/Sep2025_morePAN/snps.5bpind.merged.morePAN.minDP10.maxDP50.qual.SOR.miss10.vcf.gz
+SIF=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp/smcpp_latest.sif
+lists=/scratch1/mruggeri/AcerHapPanel/pop_gen/lists
+CHROMS=$lists/chrom.list
+POP=$lists/morePAN.list  
+prefix=global
+module load apptainer
+# subset samples and chromosome from vcf and convert to smc format
+mkdir $prefix'_vcf2smc'
+for CHROM in `cat $CHROMS`; do
+for SAMPLE in `cat $POP`; do
+apptainer exec --bind $PWD,/scratch1/mruggeri,/project2/ckenkel_26 $SIF \
+ smc++ vcf2smc -d $SAMPLE $SAMPLE --mask $MASK $VCF $prefix'_vcf2smc'/$prefix'_'$SAMPLE'_'$CHROM'.smc.gz' $CHROM $prefix':'$(echo $SAMPLE);
+ done; done
+
+# now edit SMCest_global_25Nov2025.sh to match input directory
+# IN_FILES=$(ls global_vcf2smc/* | paste -sd' ' -)
+sbatch -J global_run1 ../../scripts/pop_gen/SMCest_global_25Nov2025.sh
+# took 30min to run
+# adding a for loop to script so does multiple runs
+# OUT=global
+# for run in `seq 2 10`; do
+# apptainer exec --bind $PWD,/scratch1/mruggeri $SIF smc++ estimate \
+# --cores 30 --em-iterations 50 --timepoints 20 200000 --thinning 3000 --knots 20 4e-9 \
+# $IN_FILES -o $OUT'_run'$run;
+# done
+sbatch -J global_run2to10 ../../scripts/pop_gen/SMCest_global_25Nov2025.sh
+
+# plot all runs together
+salloc --time=02:00:00
+module load apptainer
+SIF=/scratch1/mruggeri/AcerHapPanel/pop_gen/SMCpp/smcpp_latest.sif
+apptainer exec --bind $PWD,/scratch1/mruggeri,/project2/ckenkel_26 $SIF \
+smc++ plot plots/'global_u4e09_10runs.pdf' -g 5 \
+-c global_run*/*
+
